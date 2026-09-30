@@ -7,9 +7,6 @@ auth_info*/
 # Private Prompt & Guide
 panduan_dan_prompt_whatsapp_scheduler.md
 
-# Dependencies
-node_modules/
-
 # Environment variables & Logs
 .env
 .env.local
