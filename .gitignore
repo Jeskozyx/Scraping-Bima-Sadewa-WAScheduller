@@ -4,8 +4,12 @@ auth_info/
 auth_info*/
 *.data.json
 
+# Dependencies
+node_modules/
+
 # Private Prompt & Guide
 panduan_dan_prompt_whatsapp_scheduler.md
+panduan_dan_arsitektur_bima_scraper_jadwal_dosen.md
 
 # Environment variables & Logs
 .env

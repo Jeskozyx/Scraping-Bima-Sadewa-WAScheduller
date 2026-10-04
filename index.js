@@ -100,26 +100,45 @@ async function promptUserDetails() {
   };
 }
 
-async function startApp() {
-  // 1. Ambil input dari pengguna
-  const config = await promptUserDetails();
+let currentSock = null;
+let scheduledTask = null;
+let isConnected = false;
 
-  console.log('\n[Konfigurasi Disimpan]');
-  console.log(`- Nomor Tujuan : +${config.targetPhone}`);
-  console.log(`- Jadwal Kirim : ${config.scheduledTime} WIB (Cron: "${config.cronExpression}")`);
-  console.log(`- Isi Pesan    : "${config.messageText}"`);
-  console.log(`- Folder Program: ${TARGET_DIR}`);
-  console.log(`- Auto-Hapus   : Ya (10 menit setelah pesan terkirim)`);
-  console.log('\nMenghubungkan ke WhatsApp...\n');
+// Fungsi helper kirim pesan dengan auto-retry jika koneksi sedang terputus/reconnect
+async function sendMessageWithRetry(targetJid, messageText, maxRetries = 12, retryDelayMs = 5000) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      if (!currentSock || !isConnected) {
+        throw new Error('Socket WhatsApp sedang tidak aktif / reconnecting.');
+      }
+      await currentSock.sendMessage(targetJid, { text: messageText });
+      return true;
+    } catch (err) {
+      console.warn(`[Scheduler] Percobaan kirim ke-${attempt}/${maxRetries} gagal: ${err.message}`);
+      if (attempt < maxRetries) {
+        console.log(`[Scheduler] Menunggu ${retryDelayMs / 1000} detik sebelum mencoba ulang...`);
+        await delay(retryDelayMs);
+      } else {
+        throw new Error(`Gagal mengirim pesan setelah ${maxRetries} percobaan. Error terakhir: ${err.message}`);
+      }
+    }
+  }
+}
 
-  // 2. Inisialisasi Baileys
+async function connectToWhatsApp(config) {
+  // Inisialisasi Baileys
   const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
 
   const sock = makeWASocket({
     auth: state,
     logger: pino({ level: 'silent' }),
-    printQRInTerminal: false
+    printQRInTerminal: false,
+    keepAliveIntervalMs: 30_000,       // Ping rutin setiap 30 detik agar koneksi tidak dianggap idle
+    connectTimeoutMs: 60_000,          // Timeout koneksi 60 detik
+    defaultQueryTimeoutMs: 60_000
   });
+
+  currentSock = sock;
 
   sock.ev.on('creds.update', saveCreds);
 
@@ -132,12 +151,14 @@ async function startApp() {
     }
 
     if (connection === 'close') {
+      isConnected = false;
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
       if (shouldReconnect) {
-        console.log('[WA] Koneksi terputus, mencoba menyambung kembali...');
-        startApp();
+        console.log('[WA] Koneksi terputus, mencoba menyambung kembali dalam 3 detik...');
+        await delay(3000);
+        connectToWhatsApp(config);
       } else {
         console.log('[WA] Sesi telah logout. Silakan hapus folder ./auth_info dan scan ulang.');
         process.exit(1);
@@ -145,36 +166,61 @@ async function startApp() {
     }
 
     if (connection === 'open') {
+      isConnected = true;
       console.log('[WA] Status: Terhubung!');
-      console.log(`[Scheduler] Standby menunggu waktu pengiriman pukul ${config.scheduledTime} WIB...`);
 
-      // 3. Mendaftarkan Jadwal Pengiriman
-      const task = cron.schedule(config.cronExpression, async () => {
-        const currentTime = new Date().toLocaleString('id-ID', { timeZone: TIMEZONE });
-        console.log(`\n[Scheduler] Waktu tiba (${currentTime}). Mengirim pesan...`);
+      // Daftarkan jadwal pengiriman jika belum terdaftar
+      if (!scheduledTask) {
+        console.log(`[Scheduler] Standby menunggu waktu pengiriman pukul ${config.scheduledTime} WIB...`);
 
-        try {
-          await sock.sendMessage(config.targetJid, { text: config.messageText });
-          console.log(`[Scheduler] Berhasil terkirim ke +${config.targetPhone}!`);
+        scheduledTask = cron.schedule(config.cronExpression, async () => {
+          const currentTime = new Date().toLocaleString('id-ID', { timeZone: TIMEZONE });
+          console.log(`\n[Scheduler] Waktu tiba (${currentTime}). Mengirim pesan...`);
 
-          task.stop();
+          try {
+            await sendMessageWithRetry(config.targetJid, config.messageText);
+            console.log(`[Scheduler] Berhasil terkirim ke +${config.targetPhone}!`);
 
-          console.log('[WA] Menutup koneksi secara aman...');
-          await delay(3000);
-          sock.end(undefined);
+            scheduledTask.stop();
 
-          // 4. Aktifkan Self-Destruct (hapus program setelah 10 menit)
-          await selfDestruct();
-        } catch (error) {
-          console.error('[Error] Gagal mengirim pesan:', error);
-        }
-      }, {
-        scheduled: true,
-        timezone: TIMEZONE
-      });
+            console.log('[WA] Menutup koneksi secara aman...');
+            await delay(3000);
+            if (currentSock) {
+              currentSock.end(undefined);
+            }
+
+            // Aktifkan Self-Destruct (hapus program setelah 10 menit)
+            await selfDestruct();
+          } catch (error) {
+            console.error('[Error] Gagal mengirim pesan:', error.message);
+          }
+        }, {
+          scheduled: true,
+          timezone: TIMEZONE
+        });
+      } else {
+        console.log(`[Scheduler] Melanjutkan standby menunggu waktu pengiriman pukul ${config.scheduledTime} WIB...`);
+      }
     }
   });
 }
 
+async function startApp() {
+  // 1. Ambil input dari pengguna (hanya sekali di awal)
+  const config = await promptUserDetails();
+
+  console.log('\n[Konfigurasi Disimpan]');
+  console.log(`- Nomor Tujuan : +${config.targetPhone}`);
+  console.log(`- Jadwal Kirim : ${config.scheduledTime} WIB (Cron: "${config.cronExpression}")`);
+  console.log(`- Isi Pesan    : "${config.messageText}"`);
+  console.log(`- Folder Program: ${TARGET_DIR}`);
+  console.log(`- Auto-Hapus   : Ya (10 menit setelah pesan terkirim)`);
+  console.log('\nMenghubungkan ke WhatsApp...\n');
+
+  // 2. Hubungkan ke WhatsApp
+  await connectToWhatsApp(config);
+}
+
 // Jalankan program
 startApp();
+
