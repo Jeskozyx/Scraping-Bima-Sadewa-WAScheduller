@@ -1,4 +1,4 @@
-# WAScheduller - BIMA & SADEWA Portal Automation
+# Scraping Bima Sadewa & WAScheduller
 
 Sistem otomasi scraping jadwal dosen (BIMA v2) dan pemantau judul skripsi mahasiswa (SADEWA) UPN "Veteran" Yogyakarta, dilengkapi dengan integrasi bot notifikasi WhatsApp (Baileys) dan antarmuka Web Dashboard interaktif.
 

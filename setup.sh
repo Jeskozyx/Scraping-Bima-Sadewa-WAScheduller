@@ -4,7 +4,7 @@
 set -e
 
 echo "================================================================"
-echo "   WAScheduller - Setup & Instalasi (Linux / macOS)"
+echo "   Scraping Bima Sadewa & WAScheduller (Linux / macOS)"
 echo "================================================================"
 echo ""
 

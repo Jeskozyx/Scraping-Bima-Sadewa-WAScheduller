@@ -1,9 +1,9 @@
 @echo off
 setlocal enabledelayedexpansion
-title Setup & Instalasi WAScheduller / BIMA-SADEWA Scraper
+title Setup & Instalasi Scraping Bima Sadewa & WAScheduller
 
 echo ================================================================
-echo    WAScheduller - Setup & Instalasi Sekali Klik (1-Click)
+echo    Scraping Bima Sadewa & WAScheduller
 echo    Portal BIMA v2 & SADEWA UPN "Veteran" Yogyakarta
 echo ================================================================
 echo.

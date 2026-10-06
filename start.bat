@@ -1,7 +1,7 @@
 @echo off
-title Menjalankan WAScheduller Server
+title Menjalankan Scraping Bima Sadewa & WAScheduller
 echo ================================================================
-echo    Menjalankan WAScheduller (Server & Dashboard Web)
+echo    Menjalankan Scraping Bima Sadewa & WAScheduller
 echo ================================================================
 echo.
 

@@ -1,6 +1,7 @@
 {
-  "name": "bima-jadwal-scraper",
+  "name": "scraping-bima-sadewa-wascheduller",
   "version": "1.0.0",
+  "description": "Scraping Bima Sadewa & WAScheduller - UPN Veteran Yogyakarta",
   "type": "module",
   "main": "server.js",
   "scripts": {
