@@ -1,27 +1,39 @@
-# WhatsApp Baileys Auth Session & Credentials
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# WhatsApp Baileys & Playwright Auth Session / Credentials
 auth/
 auth_info/
 auth_info*/
 *.data.json
 
-# Dependencies
-node_modules/
+# Temporary Profiles, Browser Caches & Artifacts
+tmp/
+temp/
+.temp/
 
-# Private Prompt & Guide
-panduan_dan_prompt_whatsapp_scheduler.md
-panduan_dan_arsitektur_bima_scraper_jadwal_dosen.md
+# Browser Extensions (Unpacked)
+extensions/
 
-# Environment variables & Logs
+# Environment variables & Local Configs
 .env
 .env.local
+.env.*.local
+
+# Debugging, Screenshots, and Logs
+debug_*.png
+error_*.png
+*.png
 *.log
 npm-debug.log*
 yarn-debug.log*
-yarn-error.log*
 
-# OS files
+# Private Prompts & Reference Guides
+panduan_dan_prompt_whatsapp_scheduler.md
+panduan_dan_arsitektur_bima_scraper_jadwal_dosen.md
+
+# Operating System Files
 .DS_Store
 Thumbs.db
-tmp/
-extensions/
-*.png
