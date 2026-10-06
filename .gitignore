@@ -8,11 +8,16 @@ auth/
 auth_info/
 auth_info*/
 *.data.json
+auth_*.json
+auth_bima.json
 
 # Temporary Profiles, Browser Caches & Artifacts
 tmp/
 temp/
 .temp/
+scratch/
+cloudflared.exe
+*.exe
 
 # Browser Extensions (Unpacked)
 extensions/

@@ -7,7 +7,7 @@
  * 3. Fallback API Solver (2Captcha / CapSolver) jika API key tersedia di .env
  */
 
-import { chromium } from 'playwright';
+import { launchStealthPersistentContext } from '../utils/browserLauncher.js';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
@@ -46,7 +46,7 @@ async function main() {
 
   console.log('====================================================');
   console.log('   SADEWA ONE-TIME LOGIN & SESSION SAVER');
-  console.log('   (Solusi Otomatis: Buster + Audio STT + Session Reuse)');
+  console.log('   (Solusi CloakBrowser Stealth + Buster + Audio STT)');
   console.log('====================================================');
   console.log(`Membuka peramban untuk: ${BASE_URL}/ ...`);
 
@@ -57,31 +57,51 @@ async function main() {
   ];
 
   const hasBusterExtension = fs.existsSync(path.join(EXTENSION_DIR, 'manifest.json'));
+  const extensionPaths = [];
   if (hasBusterExtension) {
     console.log('🧩 Memuat ekstensi Buster (Captcha Solver for Humans)...');
+    extensionPaths.push(EXTENSION_DIR);
     launchArgs.push(`--disable-extensions-except=${EXTENSION_DIR}`);
     launchArgs.push(`--load-extension=${EXTENSION_DIR}`);
   }
 
-  // Meluncurkan Persistent Context agar ekstensi Chrome aktif
-  const context = await chromium.launchPersistentContext(PROFILE_DIR, {
+  // Meluncurkan Persistent Context dengan CloakBrowser Stealth
+  const context = await launchStealthPersistentContext(PROFILE_DIR, {
     headless: false,
     slowMo: 60,
     viewport: { width: 1280, height: 720 },
-    args: launchArgs
+    args: launchArgs,
+    extensionPaths,
+    humanize: true
   });
 
   const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
 
   try {
     await page.goto(`${BASE_URL}/`, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(2000);
 
-    // 1. Isi Kredensial NIM & Password otomatis
+    // 0. Cek apakah sudah dalam status login (dari profil persisten)
+    const hasDashboardInitial = await page.locator('.sidebar-menu, .main-sidebar, a[href*="logout"], a:has-text("Akademik"), a:has-text("Dashboard"), nav.navbar').count().catch(() => 0);
+    const isLoginFormInitial = await page.locator('input[placeholder="username"], input[name="username"], input[type="text"]').isVisible().catch(() => false);
+
+    if (hasDashboardInitial > 0 && !isLoginFormInitial) {
+      console.log('🎉 Browser persisten sudah dalam kondisi LOGIN di Dashboard SADEWA!');
+      await page.waitForTimeout(1000);
+      await context.storageState({ path: SESSION_FILE });
+      console.log('====================================================');
+      console.log('✅ SUKSES! Sesi login SADEWA berhasil disimpan di:');
+      console.log(`   ${SESSION_FILE}`);
+      console.log('Sekarang scraper SADEWA dapat berjalan otomatis tanpa login ulang!');
+      console.log('====================================================');
+      return;
+    }
+
+    // 1. Isi Kredensial NIM & Password otomatis jika belum login
     const userInput = page.locator('input[placeholder="username"], input[name="username"], input[type="text"]').first();
     const passInput = page.locator('input[name="password"], input[placeholder="password"], input[type="password"]').first();
 
-    await userInput.waitFor({ state: 'visible', timeout: 10000 });
+    await userInput.waitFor({ state: 'visible', timeout: 15000 });
     await userInput.fill(username);
     await passInput.fill(password);
     console.log('✅ Kredensial NIM & Password berhasil diisi.');

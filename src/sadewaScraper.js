@@ -1,10 +1,12 @@
-import { chromium } from 'playwright';
+import { launchStealthBrowser, launchStealthPersistentContext } from '../utils/browserLauncher.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { trySolveCaptchaFree } from '../services/audioCaptchaSolver.js';
 import { solveRecaptcha, injectRecaptchaToken } from '../services/captchaSolver.js';
+import { parseNimInfo } from '../services/authService.js';
+import { upsertSkripsiBatchToSupabase, getUserFromSupabase } from '../services/supabaseClient.js';
 
 dotenv.config();
 
@@ -19,29 +21,39 @@ const PROFILE_DIR = path.resolve(__dirname, '../tmp/chrome_profile_sadewa');
 const OUTPUT_FILE = path.resolve(__dirname, '../skripsi_si_2023.json');
 
 /**
- * Scraper otomatis untuk portal SADEWA UPN "Veteran" Yogyakarta
- * Mengambil data judul skripsi mahasiswa Sistem Informasi angkatan 2023 (Filter NIM: 12423)
- *
- * Menggunakan sistem otomatis seperti pada BIMA:
- * 1. Session Storage Persistence (auth/sadewa_session.json) - login sekali, pakai berulang kali tanpa CAPTCHA
- * 2. Ekstensi Buster + Audio Challenge Solver otomatis jika sesi belum ada atau kadaluarsa
- * 3. Fallback API Solver jika API key tersedia di .env
- * 4. Scraping DataTables dengan filter '12423' dan pagination otomatis hingga tuntas
- * 5. Menyimpan hasil ekstraksi ke file 'skripsi_si_2023.json'
+ * Scraper otomatis untuk portal SADEWA UPN "Veteran" Yogyakarta (Stateless)
  */
-export async function scrapeSkripsiSADEWA() {
-    const username = process.env.SADEWA_NIM || process.env.BIMA_USERNAME || '';
-    const password = process.env.SADEWA_PASSWORD || process.env.BIMA_PASSWORD || '';
+export async function scrapeSkripsiSADEWA(filterNim = null, credentials = null) {
+    let username = credentials && credentials.username;
+    let password = credentials && credentials.password;
+
+    if (!username || !password) {
+      if (credentials && credentials.nim) {
+        const sb = await getUserFromSupabase(credentials.nim);
+        if (sb && sb.password) {
+          username = sb.username || sb.nim;
+          password = sb.password;
+        }
+      }
+    }
+
+    if (!username || !password) {
+      username = process.env.SADEWA_NIM || process.env.BIMA_USERNAME || '';
+      password = process.env.SADEWA_PASSWORD || process.env.BIMA_PASSWORD || '';
+    }
+
+    const activeFilterNim = String(filterNim || '12423').trim();
+    const nimMeta = parseNimInfo(activeFilterNim);
 
     if (!username || !password) {
         throw new Error(
-            '[SADEWA] Kredensial tidak ditemukan! Pastikan SADEWA_NIM & SADEWA_PASSWORD ' +
-            '(atau BIMA_USERNAME & BIMA_PASSWORD) tersedia di .env'
+            '[SADEWA] Kredensial tidak ditemukan! Silakan login melalui web atau isi kredensial di .env'
         );
     }
 
     console.log('[SADEWA] 🚀 Memulai scraper SADEWA...');
-    console.log(`[SADEWA] 👤 Username / NIM: ${username}`);
+    console.log(`[SADEWA] 👤 Akun Mahasiswa: ${username}`);
+    console.log(`[SADEWA] 🎯 Filter NIM: "${activeFilterNim}" (${nimMeta.prodi} ${nimMeta.angkatan})`);
 
     let browser = null;
     let context = null;
@@ -55,7 +67,7 @@ export async function scrapeSkripsiSADEWA() {
             console.log('[SADEWA] 🔍 Ditemukan file sesi login:', SESSION_FILE);
             console.log('[SADEWA] ⚡ Mencoba mengakses SADEWA menggunakan sesi tersimpan...');
 
-            browser = await chromium.launch({
+            browser = await launchStealthBrowser({
                 headless: false,
                 slowMo: 50,
                 args: ['--no-sandbox', '--disable-setuid-sandbox']
@@ -100,8 +112,10 @@ export async function scrapeSkripsiSADEWA() {
 
             const launchArgs = ['--no-sandbox', '--disable-setuid-sandbox'];
             const hasBuster = fs.existsSync(path.join(EXTENSION_DIR, 'manifest.json'));
+            const extensionPaths = [];
             if (hasBuster) {
                 console.log('[SADEWA] 🧩 Memuat ekstensi Buster (Captcha Solver for Humans)...');
+                extensionPaths.push(EXTENSION_DIR);
                 launchArgs.push(`--disable-extensions-except=${EXTENSION_DIR}`);
                 launchArgs.push(`--load-extension=${EXTENSION_DIR}`);
             }
@@ -110,11 +124,13 @@ export async function scrapeSkripsiSADEWA() {
                 fs.mkdirSync(PROFILE_DIR, { recursive: true });
             }
 
-            context = await chromium.launchPersistentContext(PROFILE_DIR, {
+            context = await launchStealthPersistentContext(PROFILE_DIR, {
                 headless: false,
                 slowMo: 60,
                 viewport: { width: 1366, height: 768 },
-                args: launchArgs
+                args: launchArgs,
+                extensionPaths,
+                humanize: true
             });
 
             page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
@@ -239,13 +255,13 @@ export async function scrapeSkripsiSADEWA() {
         console.log('[SADEWA] ✅ Berada di halaman target:', page.url());
 
         // ═══════════════════════════════════════════════════════════════
-        // TAHAP 3: FILTER DATATABLES — NIM PREFIX '12423' (SI 2023)
+        // TAHAP 3: FILTER DATATABLES — BERDASARKAN PREFIX NIM
         // ═══════════════════════════════════════════════════════════════
-        console.log('[SADEWA] 🔍 Memfilter NIM "12423" (Sistem Informasi Angkatan 2023)...');
+        console.log(`[SADEWA] 🔍 Memfilter NIM "${activeFilterNim}" (${nimMeta.prodi} ${nimMeta.angkatan})...`);
         await page.waitForSelector('#table_mahasiswa_filter input, input[type="search"]', { timeout: 20000 });
 
         const searchInput = page.locator('#table_mahasiswa_filter input[type="search"], #table_mahasiswa_filter input, input[type="search"]').first();
-        await searchInput.fill('12423');
+        await searchInput.fill(activeFilterNim);
         await page.waitForTimeout(2000); // Tunggu debounce DataTables merender ulang tabel
 
         // ═══════════════════════════════════════════════════════════════
@@ -279,33 +295,30 @@ export async function scrapeSkripsiSADEWA() {
                 await processing.waitFor({ state: 'hidden', timeout: 10000 }).catch(() => {});
             }
 
-            const rows = page.locator('#table_mahasiswa tbody tr, table tbody tr');
-            const rowCount = await rows.count();
+            // Optimasi Performa: Batch DOM Evaluation via page.$$eval (15 ms)
+            const rowsData = await page.$$eval('#table_mahasiswa tbody tr, table tbody tr', (rows) => {
+                return rows.map((tr) => {
+                    const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText.trim());
+                    if (cells.length < 6) return null;
+                    const no = cells[0] || '';
+                    const nim = cells[1] || '';
+                    const nama = cells[2] || '';
+                    const judulAwal = cells[3] || '';
+                    const judulTerbaru = cells[4] || '';
+                    const dosenPembimbing = cells[5] || '';
+                    const status = cells[6] || '';
+                    if (!nim || nim === 'No data available in table') return null;
+                    return { no, nim, nama, judulAwal, judulTerbaru, dosenPembimbing, status };
+                }).filter((item) => item !== null && item.nim !== '');
+            });
 
-            for (let i = 0; i < rowCount; i++) {
-                const cells = rows.nth(i).locator('td');
-                const colCount = await cells.count();
-
-                // Pastikan baris data lengkap (bukan 'No data available in table')
-                if (colCount >= 6) {
-                    const rowData = {
-                        no: (await cells.nth(0).innerText()).trim(),
-                        nim: (await cells.nth(1).innerText()).trim(),
-                        nama: (await cells.nth(2).innerText()).trim(),
-                        judulAwal: (await cells.nth(3).innerText()).trim(),
-                        judulTerbaru: (await cells.nth(4).innerText()).trim(),
-                        dosenPembimbing: (await cells.nth(5).innerText()).trim(),
-                        status: colCount >= 7 ? (await cells.nth(6).innerText()).trim() : '',
-                    };
-
-                    // Filter hanya NIM valid & hindari duplikasi
-                    if (rowData.nim && !hasilScrape.some((item) => item.nim === rowData.nim)) {
-                        hasilScrape.push(rowData);
-                    }
+            for (const row of rowsData) {
+                if (!hasilScrape.some((item) => item.nim === row.nim)) {
+                    hasilScrape.push(row);
                 }
             }
 
-            console.log(`[SADEWA]   ✅ Halaman ${halaman}: total ${hasilScrape.length} data terkumpul.`);
+            console.log(`[SADEWA]   ✅ Halaman ${halaman}: ${rowsData.length} data terbaca (total ${hasilScrape.length} data terkumpul).`);
 
             // Cek status tombol Next DataTables
             const nextButton = page.locator('#table_mahasiswa_paginate .paginate_button.next, .paginate_button.next').first();
@@ -325,19 +338,30 @@ export async function scrapeSkripsiSADEWA() {
         }
 
         // ═══════════════════════════════════════════════════════════════
-        // TAHAP 6: SIMPAN HASIL KE JSON
+        // TAHAP 6: SIMPAN HASIL KE SUPABASE DATABASE (SUPABASE ONLY)
         // ═══════════════════════════════════════════════════════════════
-        fs.writeFileSync(OUTPUT_FILE, JSON.stringify(hasilScrape, null, 2), 'utf-8');
+        try {
+            await upsertSkripsiBatchToSupabase(hasilScrape, activeFilterNim);
+        } catch (sbErr) {
+            console.error('[SADEWA] Gagal menyimpan ke Supabase:', sbErr.message);
+            throw new Error(`Gagal menyimpan ke Supabase: ${sbErr.message}`);
+        }
 
         console.log('');
         console.log('╔══════════════════════════════════════════════════════════════╗');
         console.log('║  🎉 SCRAPING SADEWA SELESAI!                                 ║');
         console.log(`║  📊 Total Data: ${String(hasilScrape.length).padEnd(45)}║`);
         console.log(`║  📄 Total Halaman: ${String(halaman).padEnd(42)}║`);
-        console.log('║  💾 File: skripsi_si_2023.json                               ║');
+        console.log(`║  ☁️  Tersimpan di: Supabase (tabel public.skripsi)`.padEnd(63) + '║');
         console.log('╚══════════════════════════════════════════════════════════════╝');
 
-        return hasilScrape;
+        return {
+            data: hasilScrape,
+            total: hasilScrape.length,
+            filterNim: activeFilterNim,
+            prodi: nimMeta.prodi,
+            angkatan: nimMeta.angkatan
+        };
 
     } catch (error) {
         console.error('[SADEWA] ❌ Error saat proses scraping:', error.message);

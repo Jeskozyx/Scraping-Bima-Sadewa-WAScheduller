@@ -35,13 +35,14 @@ Hindari menunggu selector CSS generik. Gunakan indikator teks atau URL berikut:
   * Target URL: `https://bima.upnyk.ac.id/v2/lecturer/schedule`
 
 ### D. Elemen Filter Pencarian Dosen (BIMA v2)
-* **Tombol Dropdown / Combobox Dosen:**
-  * Selector: `button[role="combobox"]` (mengandung teks `"Tampilkan Semua Jadwal Dosen"` atau `"Jadwal Dosen"`)
+* **Tombol Dropdown / Popover Dosen:**
+  * Selector: `button[aria-haspopup="dialog"]`, `button:has(span.truncate:has-text("Tampilkan Semua Jadwal Dosen"))`, atau `button:has-text("Tampilkan Semua Jadwal Dosen")`
+  * Atribut: `aria-haspopup="dialog"`, `aria-expanded="false"`, `data-state="closed"`
 * **Input Dialog Pencarian:**
-  * Selector: `[role="dialog"] input, [cmdk-input]`
+  * Selector: `[role="dialog"] input, [cmdk-input], [data-radix-popper-content-wrapper] input`
   * Placeholder: `"Cari dosen..."`
 * **Item Opsi Dosen:**
-  * Selector: `[role="option"], [cmdk-item]`
+  * Selector: `[role="option"], [cmdk-item], [data-radix-collection-item]`
 
 ### E. Struktur Tabel Jadwal Dosen (BIMA v2)
 * **Tabel:** `table tbody tr`
