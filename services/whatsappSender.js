@@ -6,7 +6,12 @@
  * Dilengkapi konversi QR Code ke DataURL untuk ditampilkan di Web UI.
  */
 
-import makeWASocket, { DisconnectReason, useMultiFileAuthState, delay } from '@whiskeysockets/baileys';
+import makeWASocket, {
+  DisconnectReason,
+  useMultiFileAuthState,
+  makeCacheableSignalKeyStore,
+  delay
+} from '@whiskeysockets/baileys';
 import pino from 'pino';
 import qrcodeTerminal from 'qrcode-terminal';
 import QRCode from 'qrcode';
@@ -15,6 +20,15 @@ let sock = null;
 let isConnected = false;
 let currentQrDataUrl = null;
 let isInitializing = false;
+
+// Cache untuk menangani retry receipt dari WhatsApp agar tidak "Menunggu pesan ini"
+const msgRetryCounterMap = new Map();
+const msgRetryCounterCache = {
+  get: (key) => msgRetryCounterMap.get(key),
+  set: (key, val) => msgRetryCounterMap.set(key, val),
+  del: (key) => msgRetryCounterMap.delete(key),
+  flushAll: () => msgRetryCounterMap.clear()
+};
 
 /**
  * Format nomor HP ke standar WhatsApp JID.
@@ -39,8 +53,7 @@ export function getWhatsAppStatus() {
 }
 
 /**
- * Inisialisasi koneksi WhatsApp via Baileys.
- * QR code ditampilkan di terminal dan juga dikonversi ke Data URL untuk Web UI.
+ * Inisialisasi koneksi WhatsApp via Baileys dengan E2EE Signal Key Store ter-cache.
  */
 export async function initWhatsApp() {
   if (sock && isConnected) return sock;
@@ -51,11 +64,18 @@ export async function initWhatsApp() {
   return new Promise(async (resolve, reject) => {
     try {
       const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
+      const logger = pino({ level: 'silent' });
 
       sock = makeWASocket({
-        auth: state,
-        logger: pino({ level: 'silent' }),
+        auth: {
+          creds: state.creds,
+          keys: makeCacheableSignalKeyStore(state.keys, logger)
+        },
+        logger,
         printQRInTerminal: false,
+        msgRetryCounterCache,
+        generateHighQualityLinkPreview: false,
+        syncFullHistory: false,
         keepAliveIntervalMs: 30_000,
         connectTimeoutMs: 60_000,
         defaultQueryTimeoutMs: 60_000
@@ -117,7 +137,7 @@ export async function initWhatsApp() {
  * @param {Object} weekAnalysis - Hasil dari analyzeFullWeek()
  * @returns {string} Teks terformat
  */
-function formatScheduleMessage(dosenName, semester, weekAnalysis) {
+export function formatScheduleMessage(dosenName, semester, weekAnalysis) {
   const dayEmojis = {
     Senin: '🟦',
     Selasa: '🟩',

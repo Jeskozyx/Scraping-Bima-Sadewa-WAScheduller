@@ -1,11 +1,12 @@
 /**
- * Skrip Login Interaktif BIMA & Penyimpan Sesi (storageState)
- *
- * Jalankan perintah: npm run login-bima
- * 1. Peramban Chromium akan terbuka secara visual (headless: false).
- * 2. NIM dan Password akan diisi otomatis dari file .env.
- * 3. Anda tinggal mencentang CAPTCHA dan menekan tombol Login.
- * 4. Setelah masuk ke dashboard, session/cookie akan otomatis disimpan ke auth/bima_session.json.
+ * Skrip Login BIMA & Penyimpan Sesi (storageState)
+ * 
+ * Menggabungkan 3 Solusi Gratis:
+ * 1. Session Storage Persistence (auth/bima_session.json) - login sekali, pakai selamanya
+ * 2. Audio Challenge Solver (Otomatis & Gratis via Speech-to-Text)
+ * 3. Ekstensi Browser "Buster: Captcha Solver for Humans" terintegrasi langsung
+ * 
+ * Tambahan: Fallback API Solver (2Captcha / CapSolver) jika API key tersedia di .env
  */
 
 import { chromium } from 'playwright';
@@ -13,6 +14,8 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import { solveRecaptcha, injectRecaptchaToken } from '../services/captchaSolver.js';
+import { trySolveCaptchaFree } from '../services/audioCaptchaSolver.js';
 
 dotenv.config();
 
@@ -22,64 +25,118 @@ const __dirname = path.dirname(__filename);
 const BASE_URL = process.env.BIMA_BASE_URL || 'https://bima.upnyk.ac.id';
 const AUTH_DIR = path.join(__dirname, '../auth');
 const SESSION_FILE = path.join(AUTH_DIR, 'bima_session.json');
+const EXTENSION_DIR = path.resolve(__dirname, '../extensions/buster');
+const PROFILE_DIR = path.resolve(__dirname, '../tmp/chrome_profile');
 
 async function main() {
   const username = process.env.BIMA_USERNAME;
   const password = process.env.BIMA_PASSWORD;
+  const hasSolverApiKey = !!(process.env.TWO_CAPTCHA_API_KEY || process.env.CAPTCHA_API_KEY || process.env.CAPSOLVER_API_KEY);
 
   if (!username || !password) {
     console.error('[Error] BIMA_USERNAME atau BIMA_PASSWORD belum diset di file .env');
     process.exit(1);
   }
 
-  // Buat folder auth jika belum ada
   if (!fs.existsSync(AUTH_DIR)) {
     fs.mkdirSync(AUTH_DIR, { recursive: true });
   }
 
+  if (!fs.existsSync(PROFILE_DIR)) {
+    fs.mkdirSync(PROFILE_DIR, { recursive: true });
+  }
+
   console.log('====================================================');
   console.log('   BIMA ONE-TIME LOGIN & SESSION SAVER');
+  console.log('   (Solusi Gratis: Buster + Audio STT + Session Reuse)');
   console.log('====================================================');
   console.log(`Membuka peramban untuk: ${BASE_URL}/login...`);
 
-  const browser = await chromium.launch({
+  // Menyiapkan argumen Playwright dengan Ekstensi Buster (Solusi 3)
+  const launchArgs = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox'
+  ];
+
+  const hasBusterExtension = fs.existsSync(path.join(EXTENSION_DIR, 'manifest.json'));
+  if (hasBusterExtension) {
+    console.log('🧩 Memuat ekstensi Buster (Captcha Solver for Humans)...');
+    launchArgs.push(`--disable-extensions-except=${EXTENSION_DIR}`);
+    launchArgs.push(`--load-extension=${EXTENSION_DIR}`);
+  }
+
+  // Meluncurkan Persistent Context agar ekstensi Chrome aktif
+  const context = await chromium.launchPersistentContext(PROFILE_DIR, {
     headless: false,
-    slowMo: 100
-  });
-
-  const context = await browser.newContext({
+    slowMo: 60,
     viewport: { width: 1280, height: 720 },
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    args: launchArgs
   });
 
-  const page = await context.newPage();
+  const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
 
   try {
     await page.goto(`${BASE_URL}/login`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.waitForTimeout(1500);
 
-    // Isi NIM & Password otomatis
+    // 1. Isi Kredensial NIM & Password otomatis
     const userInput = page.locator('input[name="username"], input[type="text"]').first();
     const passInput = page.locator('input[name="password"], input[type="password"]').first();
 
     await userInput.fill(username);
     await passInput.fill(password);
+    console.log('✅ Kredensial NIM & Password berhasil diisi.');
 
-    console.log('\n----------------------------------------------------');
-    console.log('👉 SILAKAN CENTANG CAPTCHA DAN KLIK LOGIN DI BROWSER');
-    console.log('Menunggu Anda berhasil login ke Dashboard (maks 2 menit)...');
-    console.log('----------------------------------------------------\n');
+    // 2. Coba Solver Otomatis Gratis (Solusi 2 & 3: Audio Solver / Buster)
+    console.log('\n🤖 Menjalankan solver otomatis gratis (Buster & Audio Solver)...');
+    const freeSolveResult = await trySolveCaptchaFree(page);
 
-    // Tunggu sampai halaman berpindah ke dashboard
+    let isCaptchaSolved = freeSolveResult.success;
+
+    // 3. Fallback: Jika gratis belum berhasil & ada API Key di .env, gunakan API Solver
+    if (!isCaptchaSolved && hasSolverApiKey) {
+      console.log('\n🌐 [Fallback] Menggunakan API Solver berbayar dari .env...');
+      const sitekey = await page.evaluate(() => {
+        const el = document.querySelector('.g-recaptcha, [data-sitekey]');
+        if (el && el.getAttribute('data-sitekey')) return el.getAttribute('data-sitekey');
+        return '6LekiE0sAAAAABv_pEjSv8h_B6WNnz8BTlqe7AYZ';
+      });
+
+      const solveResult = await solveRecaptcha({
+        sitekey,
+        pageUrl: `${BASE_URL}/login`
+      });
+
+      if (solveResult.success && solveResult.token) {
+        await injectRecaptchaToken(page, solveResult.token);
+        isCaptchaSolved = true;
+      }
+    }
+
+    // 4. Jika solver berhasil otomatis, klik tombol login
+    if (isCaptchaSolved) {
+      console.log('🎉 CAPTCHA terverifikasi! Menekan tombol Login otomatis...');
+      await page.waitForTimeout(1000);
+      const submitBtn = page.locator('button[type="submit"], button:has-text("Masuk"), button:has-text("Login")').first();
+      await submitBtn.click();
+    } else {
+      console.log('\n----------------------------------------------------');
+      console.log('👉 SILAKAN CENTANG CAPTCHA DAN KLIK LOGIN DI BROWSER');
+      console.log('   (Anda juga bisa menekan tombol Buster berkepala robot di captcha)');
+      console.log('Menunggu Anda berhasil login ke Dashboard (maks 2 menit)...');
+      console.log('----------------------------------------------------\n');
+    }
+
+    // 5. Tunggu sampai masuk ke Dashboard
     await Promise.race([
       page.waitForURL(/.*dashboard.*/i, { timeout: 120000 }),
       page.getByText('Dashboard', { exact: false }).waitFor({ timeout: 120000 }),
       page.locator('text=Jadwal Dosen').waitFor({ timeout: 120000 })
     ]);
 
-    // Beri jeda 2 detik agar seluruh cookie tersimpan rapi
     await page.waitForTimeout(2000);
 
-    // Simpan storage state (cookies, local storage, session)
+    // 6. Solusi 1: Simpan Sesi (Cookies & Token JWT)
     await context.storageState({ path: SESSION_FILE });
 
     console.log('====================================================');
@@ -89,9 +146,9 @@ async function main() {
     console.log('====================================================');
   } catch (err) {
     console.error('\n❌ Login gagal atau waktu habis:', err.message);
-    await page.screenshot({ path: 'debug_manual_login_failed.png', fullPage: true }).catch(() => {});
+    await page.screenshot({ path: 'debug_login_failed.png', fullPage: true }).catch(() => {});
   } finally {
-    await browser.close();
+    await context.close();
   }
 }
 

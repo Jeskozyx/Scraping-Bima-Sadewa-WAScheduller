@@ -13,7 +13,8 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { scrapeJadwalDosen } from './services/bimaScraper.js';
 import { analyzeFullWeek } from './utils/scheduleAnalyzer.js';
-import { sendScheduleToWhatsApp, getWhatsAppStatus, initWhatsApp } from './services/whatsappSender.js';
+import { sendScheduleToWhatsApp, getWhatsAppStatus, initWhatsApp, formatScheduleMessage } from './services/whatsappSender.js';
+import { scrapeSkripsiSADEWA } from './src/sadewaScraper.js';
 
 dotenv.config();
 
@@ -81,12 +82,19 @@ app.post('/api/search-schedule', async (req, res) => {
     }
 
     // 4. Kirim response
+    const formattedMsg = formatScheduleMessage(
+      scrapeResult.dosenName,
+      scrapeResult.semester,
+      weekAnalysis
+    );
+
     return res.json({
       success: true,
       data: {
         dosenName: scrapeResult.dosenName,
         semester: scrapeResult.semester,
         schedule: weekAnalysis,
+        formattedMessage: formattedMsg,
         whatsapp: waStatus
       }
     });
@@ -129,6 +137,111 @@ app.get('/api/lecturers', (req, res) => {
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// ============================================================
+// SADEWA Skripsi Endpoints
+// ============================================================
+let isScrapingSadewa = false;
+let lastSadewaStatus = {
+  status: 'idle', // 'idle' | 'running' | 'success' | 'error'
+  message: '',
+  timestamp: null,
+  total: 0
+};
+
+// GET /api/skripsi-data: Ambil data skripsi lokal (skripsi_si_2023.json)
+app.get('/api/skripsi-data', (req, res) => {
+  const filePath = path.join(__dirname, 'skripsi_si_2023.json');
+  if (fs.existsSync(filePath)) {
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const parsed = JSON.parse(content);
+      const data = Array.isArray(parsed) ? parsed : (parsed.data || []);
+      const stats = fs.statSync(filePath);
+      return res.json({
+        success: true,
+        data,
+        total: data.length,
+        lastUpdated: stats.mtime,
+        isScraping: isScrapingSadewa,
+        status: lastSadewaStatus
+      });
+    } catch (err) {
+      return res.status(500).json({
+        success: false,
+        message: 'Gagal membaca skripsi_si_2023.json: ' + err.message
+      });
+    }
+  }
+  return res.json({
+    success: true,
+    data: [],
+    total: 0,
+    isScraping: isScrapingSadewa,
+    status: lastSadewaStatus
+  });
+});
+
+// POST /api/scrape-sadewa: Mulai scraping judul skripsi SADEWA
+app.post('/api/scrape-sadewa', async (req, res) => {
+  if (isScrapingSadewa) {
+    return res.status(429).json({
+      success: false,
+      message: 'Scraping SADEWA sedang berjalan di browser. Harap tunggu hingga proses selesai.'
+    });
+  }
+
+  isScrapingSadewa = true;
+  lastSadewaStatus = {
+    status: 'running',
+    message: 'Scraping sedang berjalan di browser Chromium...',
+    timestamp: new Date().toISOString(),
+    total: 0
+  };
+
+  try {
+    console.log('\n[API SADEWA] Memulai proses scraping otomatis...');
+    const result = await scrapeSkripsiSADEWA();
+    const dataArray = Array.isArray(result) ? result : (result.data || []);
+
+    isScrapingSadewa = false;
+    lastSadewaStatus = {
+      status: 'success',
+      message: `Scraping selesai! ${dataArray.length} data skripsi berhasil diambil.`,
+      timestamp: new Date().toISOString(),
+      total: dataArray.length
+    };
+
+    return res.json({
+      success: true,
+      message: `Scraping SADEWA berhasil! Total ${dataArray.length} data terkumpul.`,
+      data: dataArray,
+      total: dataArray.length
+    });
+  } catch (error) {
+    isScrapingSadewa = false;
+    lastSadewaStatus = {
+      status: 'error',
+      message: `Gagal scraping: ${error.message}`,
+      timestamp: new Date().toISOString(),
+      total: 0
+    };
+    console.error('[API SADEWA] Error:', error.message);
+    return res.status(500).json({
+      success: false,
+      message: `Scraping gagal: ${error.message}`
+    });
+  }
+});
+
+// GET /api/scrape-sadewa/status: Cek status scraping saat ini
+app.get('/api/scrape-sadewa/status', (req, res) => {
+  res.json({
+    success: true,
+    isScraping: isScrapingSadewa,
+    status: lastSadewaStatus
+  });
 });
 
 // Start server
