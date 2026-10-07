@@ -96,7 +96,14 @@ export async function scrapeJadwalBimaCepat(namaDosen = '', semester = 'Gasal 20
     console.log('[BIMA OPTIMIZED] ⚡ Mengekstrak baris tabel dengan Batch $$eval...');
     const rawTableRows = await page.$$eval('table tbody tr', (rows) => {
       return rows.map((tr) => {
-        const cells = Array.from(tr.querySelectorAll('td')).map((td) => (td.innerText || td.textContent || '').trim());
+        const getCleanCellText = (el) => {
+          if (!el) return '';
+          const clone = el.cloneNode(true);
+          clone.querySelectorAll('br').forEach((b) => b.replaceWith('\n'));
+          clone.querySelectorAll('div, p, li, span').forEach((b) => b.after('\n'));
+          return (clone.innerText || clone.textContent || '').replace(/\r/g, '\n').trim();
+        };
+        const cells = Array.from(tr.querySelectorAll('td')).map((td) => getCleanCellText(td));
         if (cells.length < 8) return null;
 
         // Kolom BIMA v2:
@@ -117,7 +124,7 @@ export async function scrapeJadwalBimaCepat(namaDosen = '', semester = 'Gasal 20
         let jamMulai = '00:00';
         let jamSelesai = '00:00';
 
-        const match = jadwal.match(/([A-Za-z]+)\s+(\d{1,2}[:.]\d{2})\s*[-–]\s*(\d{1,2}[:.]\d{2})/);
+        const match = jadwal.match(/([A-Za-z]+)\s+(\d{1,2}[:.]\d{2})\s*[-–—]\s*(\d{1,2}[:.]\d{2})/);
         if (match) {
           hari = match[1];
           jamMulai = match[2].replace('.', ':');

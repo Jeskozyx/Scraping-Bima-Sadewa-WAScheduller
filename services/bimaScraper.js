@@ -13,7 +13,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { trySolveCaptchaFree } from './audioCaptchaSolver.js';
 import { solveRecaptcha, injectRecaptchaToken } from './captchaSolver.js';
-import { upsertDosenBatchToSupabase, upsertJadwalBatchToSupabase, getJadwalFromSupabase, getUserFromSupabase } from './supabaseClient.js';
+import { upsertDosenBatchToSupabase, upsertJadwalBatchToSupabase, getJadwalFromSupabase, getUserFromSupabase, extractCanonicalLecturers } from './supabaseClient.js';
 
 dotenv.config();
 
@@ -241,13 +241,21 @@ export async function extractLecturersAndSchedules(page, prodi = '') {
     console.warn('[BimaScraper] ⚠️ Tombol dropdown dosen tidak ditemukan secara langsung, memeriksa tabel...');
   }
 
-  // 3. Ekstraksi Baris Jadwal dari TABEL
+  // 3. Ekstraksi Baris Jadwal dari TABEL (Menghormati baris baru pada multi-dosen <br> / <div>)
   const tableData = await page.evaluate(() => {
     const trs = Array.from(document.querySelectorAll('table tbody tr'));
     const rows = [];
 
+    const getCleanCellText = (el) => {
+      if (!el) return '';
+      const clone = el.cloneNode(true);
+      clone.querySelectorAll('br').forEach((b) => b.replaceWith('\n'));
+      clone.querySelectorAll('div, p, li, span').forEach((b) => b.after('\n'));
+      return (clone.innerText || clone.textContent || '').replace(/\r/g, '\n').trim();
+    };
+
     trs.forEach((tr) => {
-      const tds = Array.from(tr.querySelectorAll('td')).map((td) => (td.textContent || td.innerText || '').trim());
+      const tds = Array.from(tr.querySelectorAll('td')).map((td) => getCleanCellText(td));
       if (tds.length >= 9) {
         const rowItem = {
           prodi: tds[0] || '',
@@ -304,38 +312,15 @@ export async function extractLecturersAndSchedules(page, prodi = '') {
   }
 
   // 6. Simpan baris jadwal ke Supabase tabel jadwal jika ada
+  // Multi-dosen (Team Teaching) dipecah menjadi entri individual terpisah tanpa penggabungan string kotor
   if (tableData.rows && tableData.rows.length > 0) {
     console.log(`[BimaScraper] 💾 Menyimpan ${tableData.rows.length} baris jadwal ke Supabase...`);
     const jadwalByDosen = {};
 
-    function resolveCanonicalName(rawName) {
-      if (!rawName) return null;
-      const clean = rawName.replace(/^[-•*]\s*/, '').trim();
-      const exact = allLecturers.find((c) => c.toLowerCase() === clean.toLowerCase());
-      if (exact) return exact;
-
-      // Cocokkan kata kunci inti (nama tanpa gelar)
-      const coreWords = clean.replace(/\b(dr|dra|drs|ir|prof|se|mm|msi|s\.e|m\.si|sh|mh|s\.kom|m\.kom|s\.pd|m\.pd|s\.s|m\.hum|ph\.d|m\.sc|m\.acc|ak|akt|ca)\b/gi, '')
-        .replace(/[^a-zA-Z\s]/g, '')
-        .trim()
-        .split(/\s+/)
-        .filter((w) => w.length >= 3);
-
-      if (coreWords.length > 0) {
-        const matched = allLecturers.find((c) => {
-          const cLower = c.toLowerCase();
-          return coreWords.every((w) => cLower.includes(w));
-        });
-        if (matched) return matched;
-      }
-      return clean;
-    }
-
     for (const r of tableData.rows) {
       if (r.dosen) {
-        const rawList = r.dosen.split(/[\n\r•]+/).map((d) => d.trim()).filter((d) => d.length > 2);
-        for (const rawD of rawList) {
-          const dName = resolveCanonicalName(rawD);
+        const canonicalLecs = extractCanonicalLecturers(r.dosen, allLecturers);
+        for (const dName of canonicalLecs) {
           if (dName) {
             if (!jadwalByDosen[dName]) jadwalByDosen[dName] = [];
             jadwalByDosen[dName].push(r);

@@ -324,8 +324,72 @@ export async function getDosenFromSupabase(search = '', prodi = '') {
 // OPERASI TABEL JADWAL (Jadwal Mengajar Dosen)
 // ============================================================
 
+let cachedMasterLecturers = null;
+let lastCacheTime = 0;
+
+/**
+ * Ekstraksi nama-nama dosen kanonikal dari teks mentah (termasuk kelas team teaching)
+ * @param {string} text 
+ * @param {Array<string>} masterLecturers 
+ * @returns {Array<string>}
+ */
+export function extractCanonicalLecturers(text, masterLecturers = []) {
+  if (!text) return [];
+  const cleanText = text.replace(/\s+/g, ' ').trim();
+  const found = [];
+  const degreeRegex = /\b(dr|dra|drs|ir|prof|se|mm|msi|s\.e|m\.si|sh|mh|s\.kom|m\.kom|s\.pd|m\.pd|s\.s|m\.hum|ph\.d|phd|m\.sc|m\.acc|ak|akt|ca|s\.t|m\.t|s\.si|m\.or|s\.st|m\.eng|m\.ict|mce|mcf|cipm|lic\.th|m\.psi)\b/gi;
+
+  if (Array.isArray(masterLecturers) && masterLecturers.length > 0) {
+    for (const lec of masterLecturers) {
+      const coreWords = lec
+        .replace(degreeRegex, '')
+        .replace(/[^a-zA-Z\s]/g, ' ')
+        .trim()
+        .split(/\s+/)
+        .filter((w) => w.length >= 3);
+
+      if (coreWords.length === 0) continue;
+
+      const textNorm = cleanText.toLowerCase().replace(/[^a-z\s]/g, ' ');
+      const matches = coreWords.every((w) => {
+        const regex = new RegExp('\\b' + w.toLowerCase() + '\\b', 'i');
+        return regex.test(textNorm) || textNorm.includes(w.toLowerCase());
+      });
+
+      if (matches) found.push(lec);
+    }
+  }
+
+  if (found.length > 0) {
+    return Array.from(new Set(found));
+  }
+
+  return [cleanText];
+}
+
+/**
+ * Dapatkan daftar master dosen kanonikal dengan caching in-memory
+ */
+export async function getCachedMasterLecturers() {
+  const now = Date.now();
+  if (cachedMasterLecturers && (now - lastCacheTime < 3600000)) {
+    return cachedMasterLecturers;
+  }
+  if (!isSupabaseConfigured()) return [];
+  try {
+    const { data } = await supabase.from('dosen').select('nama');
+    if (data && Array.isArray(data)) {
+      cachedMasterLecturers = data.map((d) => d.nama);
+      lastCacheTime = now;
+      return cachedMasterLecturers;
+    }
+  } catch {}
+  return [];
+}
+
 /**
  * Simpan baris-baris jadwal mengajar dosen ke tabel `jadwal`
+ * Menormalisasi nama dosen ke nama kanonikal baku agar tidak menimbulkan duplikasi data.
  * @param {string} dosenNama - Nama dosen
  * @param {string} semester - Semester target
  * @param {Array<Object>} rawRows - Array baris mentah dari scraper tabel BIMA
@@ -336,27 +400,39 @@ export async function upsertJadwalBatchToSupabase(dosenNama, semester = 'Gasal 2
   }
 
   try {
+    // 1. Normalisasi nama dosen ke nama kanonikal resmi
+    const masterList = await getCachedMasterLecturers();
+    const resolved = extractCanonicalLecturers(dosenNama, masterList);
+    const targetDosenNama = (resolved && resolved.length === 1) ? resolved[0] : dosenNama.replace(/\s+/g, ' ').trim();
+
     const dayNames = ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
-    const records = [];
+    const recordsMap = new Map();
 
     for (const row of rawRows) {
-      const match = (row.jadwal || '').match(/([A-Za-z]+)\s+(\d{1,2}[:.]\d{2})\s*-\s*(\d{1,2}[:.]\d{2})/);
+      // Dukung berbagai karakter strip (hyphen, en-dash, em-dash)
+      const match = (row.jadwal || '').match(/([A-Za-z]+)\s+(\d{1,2}[:.]\d{2})\s*[-–—]\s*(\d{1,2}[:.]\d{2})/);
       const hariStr = match ? match[1] : (row.hari || '');
       const jamMulai = match ? match[2].replace('.', ':') : (row.jamMulai || '00:00');
       const jamSelesai = match ? match[3].replace('.', ':') : (row.jamSelesai || '00:00');
       const isPraktikum = /praktikum/i.test(row.matkul || '');
 
       const standardDay = dayNames.find((d) => d.toLowerCase() === hariStr.toLowerCase()) || hariStr;
+      const cleanMatkul = (row.matkul || '-').replace(/\s+/g, ' ').trim();
+      const cleanKelas = (row.kelas || '-').replace(/\s+/g, ' ').trim();
+      const cleanRuang = (row.ruang || '-').replace(/\s+/g, ' ').trim();
 
-      records.push({
-        dosen_nama: dosenNama,
+      // Gunakan composite key untuk mencegah duplikasi sebelum dikirim ke Supabase
+      const uniqueKey = [targetDosenNama, semester || 'Gasal 2026/2027', standardDay || 'Senin', jamMulai, cleanMatkul, cleanKelas].join('|');
+
+      recordsMap.set(uniqueKey, {
+        dosen_nama: targetDosenNama,
         semester: semester || 'Gasal 2026/2027',
         hari: standardDay || 'Senin',
         jam_mulai: jamMulai,
         jam_selesai: jamSelesai,
-        matkul: row.matkul || '-',
-        kelas: row.kelas || '-',
-        ruang: row.ruang || '-',
+        matkul: cleanMatkul,
+        kelas: cleanKelas,
+        ruang: cleanRuang,
         sks: String(row.sks || ''),
         jml_mhs: String(row.jmlMhs || row.jml_mhs || ''),
         is_praktikum: isPraktikum,
@@ -365,6 +441,7 @@ export async function upsertJadwalBatchToSupabase(dosenNama, semester = 'Gasal 2
       });
     }
 
+    const records = Array.from(recordsMap.values());
     if (records.length === 0) return null;
 
     const { data, error } = await supabase
@@ -377,7 +454,7 @@ export async function upsertJadwalBatchToSupabase(dosenNama, semester = 'Gasal 2
       return null;
     }
 
-    console.log(`[Supabase] ✅ ${records.length} baris jadwal untuk "${dosenNama}" berhasil disimpan ke tabel jadwal!`);
+    console.log(`[Supabase] ✅ ${records.length} baris jadwal untuk "${targetDosenNama}" berhasil disimpan ke tabel jadwal!`);
     return data;
   } catch (err) {
     console.warn('[Supabase] Exception saat menyimpan jadwal dosen:', err.message);
@@ -390,11 +467,11 @@ export async function upsertJadwalBatchToSupabase(dosenNama, semester = 'Gasal 2
  * @param {string} dosenNama 
  * @param {string} semester 
  */
-export async function getJadwalFromSupabase(dosenNama, semester = 'Gasal 2026/2027') {
+export async function getJadwalFromSupabase(dosenNama = '', semester = 'Gasal 2026/2027') {
   if (!isSupabaseConfigured()) return null;
 
   try {
-    const cleanSearch = dosenNama.trim();
+    const cleanSearch = (dosenNama || '').trim();
     let query = supabase
       .from('jadwal')
       .select('*')
@@ -405,7 +482,11 @@ export async function getJadwalFromSupabase(dosenNama, semester = 'Gasal 2026/20
       query = query.ilike('semester', `%${semester}%`);
     }
 
-    let { data, error } = await query.ilike('dosen_nama', `%${cleanSearch}%`);
+    if (cleanSearch) {
+      query = query.ilike('dosen_nama', `%${cleanSearch}%`);
+    }
+
+    let { data, error } = await query;
 
     // Jika tidak ditemukan dengan exact ilike, cari dengan kata kunci nama inti (tanpa gelar)
     if ((!data || data.length === 0) && cleanSearch) {
